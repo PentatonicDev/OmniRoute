@@ -44,6 +44,7 @@ interface ProviderSummaryCardProps {
   onDisplayModeChange(mode: ProviderDisplayMode): void;
   onNewProvider(): void;
   onImportFromFile(): void;
+  onImportOAuthExport?(): void;
   searchQuery: string;
   setModelSearchQuery(value: string): void;
   setSearchQuery(value: string): void;
@@ -99,6 +100,7 @@ export default function ProviderSummaryCard({
   onDisplayModeChange,
   onNewProvider,
   onImportFromFile,
+  onImportOAuthExport,
   searchQuery,
   setModelSearchQuery,
   setSearchQuery,
@@ -224,6 +226,11 @@ export default function ProviderSummaryCard({
             {providerText(t, "importFromFile", "Import from file")}
           </Button>
           <NewModelsButton />
+          {onImportOAuthExport && (
+            <Button size="sm" variant="secondary" icon="key_vertical" onClick={onImportOAuthExport}>
+              {providerText(t, "importOAuthExport", "Import OAuth export")}
+            </Button>
+          )}
           <Button
             size="sm"
             variant="outline"
