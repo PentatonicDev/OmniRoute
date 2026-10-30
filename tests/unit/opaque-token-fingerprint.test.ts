@@ -82,6 +82,7 @@ const MIGRATED_FILES = [
   "src/sse/services/credentialSelectionDiagnostics.ts",
   "open-sse/services/tokenRefresh/passiveCodex.ts",
   "src/sse/services/museSessionOwnership.ts",
+  "src/server/authz/entra/evaluate.ts",
 ];
 
 test("migrated call sites import the helper instead of hashing inline", () => {
