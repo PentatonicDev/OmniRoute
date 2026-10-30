@@ -1,0 +1,1 @@
+- **fix(sse):** the Codex rejected-token fingerprint, the Muse session-ownership digest and the Z Code per-key state map now go through `opaqueTokenFingerprint()` instead of an inline `createHash`; outputs are byte-identical, so stored values keep matching (#0000)
