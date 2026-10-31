@@ -1,0 +1,115 @@
+name: Build fork image to GHCR
+
+# Fork-only: builds the Dockerfile `runner-base` target for an arbitrary ref on a
+# GitHub-hosted runner and pushes it to ghcr.io/<owner>/omniroute with GITHUB_TOKEN.
+# Never build this image on a production host (it starves the box; see t_189316ce).
+# Independent of docker-publish.yml: no Docker Hub secrets, no release tags, no :latest.
+#
+# Tags: <first 8 chars of the commit SHA> and sha-<full commit SHA>.
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Commit SHA, branch or tag to build (e.g. 32bc8dac4b2c5c45ea938019b0b94e8ca59bd202)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ghcr-fork-image-${{ inputs.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build and push runner-base (linux/amd64)
+    # Upstream (cheaper-inference) has its own publish pipeline; this one is for the fork.
+    if: github.repository_owner == 'PentatonicDev'
+    runs-on: ubuntu-latest
+    # Same webpack build as docker-publish.yml: 27-55 min observed on hosted runners.
+    timeout-minutes: 180
+    permissions:
+      contents: read
+      packages: write
+    env:
+      INPUT_REF: ${{ inputs.ref }}
+    steps:
+      - name: Validate ref input
+        run: |
+          if ! printf '%s' "$INPUT_REF" | grep -Eq '^[A-Za-z0-9._/-]{1,200}$'; then
+            echo "::error::ref contains unsupported characters"
+            exit 1
+          fi
+
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.ref }}
+          # Full history so a short SHA (e.g. 32bc8dac) resolves as well as a full one.
+          fetch-depth: 0
+
+      - name: Resolve image tags
+        id: meta
+        run: |
+          full_sha="$(git rev-parse HEAD)"
+          short_sha="${full_sha:0:8}"
+          image="ghcr.io/$(printf '%s' "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')/omniroute"
+          {
+            echo "image=${image}"
+            echo "full_sha=${full_sha}"
+            echo "short_sha=${short_sha}"
+            echo "tags<<EOF"
+            echo "${image}:${short_sha}"
+            echo "${image}:sha-${full_sha}"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Assert Docker Engine
+        run: docker info
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Build args identical to docker-publish.yml (webpack, 12288 MB heap).
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          target: runner-base
+          platforms: linux/amd64
+          build-args: |
+            OMNIROUTE_USE_TURBOPACK=0
+            OMNIROUTE_BUILD_MEMORY_MB=12288
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ steps.meta.outputs.full_sha }}
+          cache-from: type=gha,scope=ghcr-fork-amd64
+          cache-to: type=gha,scope=ghcr-fork-amd64,mode=max,ignore-error=true
+
+      - name: Summary
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          IMAGE: ${{ steps.meta.outputs.image }}
+          SHORT_SHA: ${{ steps.meta.outputs.short_sha }}
+          FULL_SHA: ${{ steps.meta.outputs.full_sha }}
+        run: |
+          {
+            echo "### Fork image published"
+            echo ""
+            echo "- Commit: \`${FULL_SHA}\`"
+            echo "- Digest: \`${DIGEST}\`"
+            echo "- Pull: \`${IMAGE}:${SHORT_SHA}\` or \`${IMAGE}@${DIGEST}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
