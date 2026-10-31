@@ -31,6 +31,7 @@ import {
   appendBufferedKiroToolInput,
   encodeSse,
   getBufferedKiroToolInput,
+  isKiroCallsContract,
   validateKiroToolCallWrapperInput,
   validateKiroToolName,
   validateKiroToolUse,
@@ -487,18 +488,32 @@ export class KiroExecutor extends BaseExecutor {
         )?.userInputMessage as Record<string, unknown>
       )?.content as string) || "";
     const thinkingExpected = userContent.includes("<thinking_mode>enabled</thinking_mode>");
+    const user = ((tb?.conversationState as JsonRecord)?.currentMessage as JsonRecord)
+      ?.userInputMessage as JsonRecord | undefined;
+    const context = user?.userInputMessageContext as JsonRecord | undefined;
+    const tools = Array.isArray(context?.tools) ? context.tools : [];
+    const wrapper = tools
+      .map((tool: JsonRecord) => tool.toolSpecification as JsonRecord)
+      .find((spec: JsonRecord) => spec?.name === "tool_call");
+    const toolCallSchema = (wrapper?.inputSchema as JsonRecord | undefined)?.json as
+      JsonRecord | undefined;
     const transformedResponse =
       stream && isKiroToolCallRepairEnabled()
         ? createKiroToolCallRepairStream({
             upstream: response,
             transform: (raw, opts) =>
-              this.transformEventStreamToSSE(raw, model, { thinkingExpected, ...opts }),
+              this.transformEventStreamToSSE(raw, model, {
+                thinkingExpected,
+                toolCallSchema,
+                ...opts,
+              }),
             retry: async (payload, retrySignal) => (await send(payload, retrySignal)).res,
             transformedBody,
+            callsContract: isKiroCallsContract(toolCallSchema),
             signal,
             log,
           })
-        : this.transformEventStreamToSSE(response, model, { thinkingExpected });
+        : this.transformEventStreamToSSE(response, model, { thinkingExpected, toolCallSchema });
 
     return { response: transformedResponse, url, headers, transformedBody };
   }
@@ -522,6 +537,7 @@ export class KiroExecutor extends BaseExecutor {
     model: string,
     opts: {
       thinkingExpected?: boolean;
+      toolCallSchema?: JsonRecord;
       /** Return true to suppress the error frame (the one-shot repair will retry). */
       onInvalidToolCall?: (message: string) => boolean;
       responseId?: string;
@@ -637,7 +653,7 @@ export class KiroExecutor extends BaseExecutor {
       for (const toolCall of state.pendingWrapperToolCalls.values()) {
         const toolInput = getBufferedKiroToolInput(toolCall);
         try {
-          validateKiroToolCallWrapperInput(toolInput);
+          validateKiroToolCallWrapperInput(toolInput, isKiroCallsContract(opts.toolCallSchema));
         } catch (error) {
           failInvalidToolCall(controller, error instanceof Error ? error.message : String(error));
           return false;

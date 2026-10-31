@@ -289,3 +289,170 @@ test("buildKiroToolCallRepairPayload appends a capped reason to the current user
   assert.match(content, /Previous validation error: x{300}$/);
   assert.deepEqual(repaired.conversationState.history, original.conversationState.history);
 });
+
+test("executor propagates declared calls schema in streaming and non-streaming modes", async () => {
+  for (const stream of [true, false]) {
+    const bodies = installFetch([
+      [
+        kiroEventFrame("toolUseEvent", {
+          toolUseId: "call_1",
+          name: "tool_call",
+          input: { calls: [{ name: "synthetic", arguments: {} }] },
+        }),
+        kiroEventFrame("messageStopEvent", {}),
+      ],
+    ]);
+    const body = {
+      conversationState: {
+        currentMessage: {
+          userInputMessage: {
+            content: "hello",
+            userInputMessageContext: {
+              tools: [
+                {
+                  toolSpecification: {
+                    name: "tool_call",
+                    inputSchema: { json: CALLS_SCHEMA },
+                  },
+                },
+              ],
+            },
+          },
+        },
+      },
+    };
+    const result = await new KiroExecutor().execute({
+      model: "claude-sonnet-4.6",
+      body,
+      stream,
+      credentials: {
+        apiKey: "synthetic",
+        providerSpecificData: { authMethod: "api_key", region: "us-east-1" },
+      },
+    } as Parameters<InstanceType<typeof KiroExecutor>["execute"]>[0]);
+    const text = await result.response.text();
+    assert.equal(bodies.length, 1);
+    assert.doesNotMatch(text, /invalid_kiro_tool_call|repair_retry_failed/);
+    assert.match(text, /synthetic/);
+  }
+});
+
+const CALLS_SCHEMA = {
+  type: "object",
+  properties: {
+    calls: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: { name: { type: "string" }, arguments: { type: "object" } },
+        required: ["name", "arguments"],
+      },
+    },
+  },
+  required: ["calls"],
+};
+
+const CALLS_INVALID = [
+  kiroEventFrame("toolUseEvent", {
+    toolUseId: "calls_bad",
+    name: "tool_call",
+    input: { calls: [] },
+  }),
+  kiroEventFrame("messageStopEvent", {}),
+];
+const CALLS_VALID = [
+  kiroEventFrame("toolUseEvent", {
+    toolUseId: "calls_ok",
+    name: "tool_call",
+    input: { calls: [{ name: "synthetic_lookup", arguments: {} }] },
+  }),
+  kiroEventFrame("messageStopEvent", {}),
+];
+
+function runCallsExecutor(signal?: AbortSignal) {
+  return new KiroExecutor().execute({
+    model: "claude-sonnet-4.6",
+    body: {
+      conversationState: {
+        currentMessage: {
+          userInputMessage: {
+            content: "hello",
+            userInputMessageContext: {
+              tools: [
+                {
+                  toolSpecification: {
+                    name: "tool_call",
+                    inputSchema: { json: CALLS_SCHEMA },
+                  },
+                },
+              ],
+            },
+          },
+        },
+      },
+    },
+    stream: true,
+    credentials: {
+      apiKey: "kiro-...ly",
+      providerSpecificData: { authMethod: "api_key", region: "us-east-1" },
+    },
+    signal,
+  } as Parameters<InstanceType<typeof KiroExecutor>["execute"]>[0]);
+}
+
+test("calls[] contract: invalid calls retry once with a calls[] instruction and then succeeds", async () => {
+  const bodies = installFetch([CALLS_INVALID, CALLS_VALID]);
+  const text = await (await runCallsExecutor()).response.text();
+
+  assert.equal(bodies.length, 2, "exactly one repair retry");
+  assert.doesNotMatch(text, /invalid_kiro_tool_call|repair_retry_failed/);
+  assert.match(text, /synthetic_lookup/);
+  const retryContent = userContentOf(bodies[1]);
+  assert.match(retryContent, /non-empty calls array/);
+  assert.match(retryContent, /Previous validation error: .*input\.calls/);
+  assert.doesNotMatch(retryContent, /input\.name and input\.arguments/);
+  assert.equal(userContentOf(bodies[0]), "hello");
+});
+
+test("calls[] contract: repeated invalid calls end with kiro_tool_call_repair_retry_failed after one retry", async () => {
+  const bodies = installFetch([CALLS_INVALID, CALLS_INVALID]);
+  const text = await (await runCallsExecutor()).response.text();
+
+  assert.equal(bodies.length, 2);
+  assert.match(text, /kiro_tool_call_repair_retry_failed/);
+  assert.match(text, /input\.calls/);
+  assert.doesNotMatch(text, /invalid_kiro_tool_call/);
+});
+
+test("calls[] contract: cancelling during the repair retry cancels it and does not refetch", async () => {
+  const controller = new AbortController();
+  let fetches = 0;
+  let retryCancelled = false;
+  globalThis.fetch = async (_input, init) => {
+    fetches++;
+    if (fetches === 1) return eventStreamResponse(CALLS_INVALID);
+    return new Response(
+      new ReadableStream<Uint8Array>({
+        start() {
+          init?.signal?.addEventListener("abort", () => {
+            retryCancelled = true;
+          });
+        },
+        cancel() {
+          retryCancelled = true;
+        },
+      }),
+      { status: 200 }
+    );
+  };
+  const result = await runCallsExecutor(controller.signal);
+  const reader = result.response.body!.getReader();
+  const first = await reader.read();
+  assert.equal(first.done, false);
+  const pending = reader.read().catch(() => ({ done: true }));
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  await reader.cancel("client went away");
+  await pending;
+  assert.equal(fetches, 2, "no extra retry after cancellation");
+  assert.equal(retryCancelled, true);
+});
