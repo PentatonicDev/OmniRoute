@@ -1,0 +1,61 @@
+name: Pentatonic image (pinned commit)
+
+# Ops-only workflow on branch ops/image-32bc8dac. Builds the image from the
+# exact approved commit (not from this branch's tip) and pushes a fixed tag.
+on:
+  push:
+    branches: ["ops/image-32bc8dac"]
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: pentatonic-image-32bc8dac
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      SRC_SHA: 32bc8dac4b2c5c45ea938019b0b94e8ca59bd202
+      IMAGE: ghcr.io/pentatonicdev/omniroute:32bc8dac
+    steps:
+      - name: Checkout approved commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.SRC_SHA }}
+          persist-credentials: false
+
+      - name: Verify commit
+        run: test "$(git rev-parse HEAD)" = "$SRC_SHA"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: runner-base
+          platforms: linux/amd64
+          build-args: |
+            OMNIROUTE_USE_TURBOPACK=0
+            OMNIROUTE_BUILD_MEMORY_MB=12288
+          labels: |
+            org.opencontainers.image.revision=${{ env.SRC_SHA }}
+            org.opencontainers.image.source=https://github.com/PentatonicDev/OmniRoute
+          tags: ${{ env.IMAGE }}
+          push: true
+          provenance: false
+
+      - name: Digest
+        run: echo "DIGEST=${{ steps.build.outputs.digest }}" | tee -a "$GITHUB_STEP_SUMMARY"
