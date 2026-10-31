@@ -35,6 +35,27 @@ export function validateKiroToolName(toolUse: JsonRecord): string {
   return toolName;
 }
 
+const asSchemaRecord = (value: unknown): JsonRecord | null =>
+  value && typeof value === "object" && !Array.isArray(value) ? (value as JsonRecord) : null;
+
+/**
+ * True only when the declared `tool_call` schema is the batched "calls" contract:
+ * `calls` is a required array of objects declaring `name` and `arguments`, and the
+ * top level does not itself require `name`/`arguments` (legacy contract). A homonymous
+ * tool with an optional or differently-shaped `calls` keeps the legacy validation.
+ */
+export function isKiroCallsContract(schema: unknown): boolean {
+  const root = asSchemaRecord(schema);
+  const properties = asSchemaRecord(root?.properties);
+  const calls = asSchemaRecord(properties?.calls);
+  if (!root || calls?.type !== "array") return false;
+  const required = Array.isArray(root.required) ? root.required : [];
+  if (!required.includes("calls")) return false;
+  if (required.includes("name") || required.includes("arguments")) return false;
+  const itemProps = asSchemaRecord(asSchemaRecord(calls.items)?.properties);
+  return !!itemProps && "name" in itemProps && "arguments" in itemProps;
+}
+
 export function validateKiroToolCallWrapperInput(toolInput: unknown, callsSchema = false): void {
   if (toolInput === undefined) {
     throw new Error("Invalid Kiro tool_call payload: missing input");

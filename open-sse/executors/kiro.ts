@@ -31,6 +31,7 @@ import {
   appendBufferedKiroToolInput,
   encodeSse,
   getBufferedKiroToolInput,
+  isKiroCallsContract,
   validateKiroToolCallWrapperInput,
   validateKiroToolName,
   validateKiroToolUse,
@@ -508,6 +509,7 @@ export class KiroExecutor extends BaseExecutor {
               }),
             retry: async (payload, retrySignal) => (await send(payload, retrySignal)).res,
             transformedBody,
+            callsContract: isKiroCallsContract(toolCallSchema),
             signal,
             log,
           })
@@ -651,9 +653,7 @@ export class KiroExecutor extends BaseExecutor {
       for (const toolCall of state.pendingWrapperToolCalls.values()) {
         const toolInput = getBufferedKiroToolInput(toolCall);
         try {
-          const properties = opts.toolCallSchema?.properties as JsonRecord | undefined;
-          const calls = properties?.calls as JsonRecord | undefined;
-          validateKiroToolCallWrapperInput(toolInput, calls?.type === "array");
+          validateKiroToolCallWrapperInput(toolInput, isKiroCallsContract(opts.toolCallSchema));
         } catch (error) {
           failInvalidToolCall(controller, error instanceof Error ? error.message : String(error));
           return false;

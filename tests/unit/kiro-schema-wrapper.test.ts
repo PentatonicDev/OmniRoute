@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { KiroExecutor } from "../../open-sse/executors/kiro.ts";
+import { isKiroCallsContract } from "../../open-sse/executors/kiroToolCallValidation.ts";
 import { FORMATS } from "../../open-sse/translator/formats.ts";
 import { createSSETransformStreamWithLogger } from "../../open-sse/utils/stream.ts";
 
@@ -133,7 +134,7 @@ test("DIAGNOSTIC synthetic MCP name and arguments is accepted at Kiro seam", asy
 });
 
 test("declared calls validates each call and preserves multiple fragmented calls", async () => {
-  const schema = { properties: { calls: { type: "array" } } };
+  const schema = HERMES_SCHEMA;
   for (const input of [
     { calls: [] },
     { calls: [{ name: "", arguments: {} }] },
@@ -194,3 +195,165 @@ test("homonymous tool without calls schema retains original validation", async (
     .text();
   assert.match(text, /invalid_kiro_tool_call/);
 });
+
+const HERMES_SCHEMA = {
+  type: "object",
+  properties: {
+    calls: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: { name: { type: "string" }, arguments: { type: "object" } },
+        required: ["name", "arguments"],
+      },
+    },
+  },
+  required: ["calls"],
+};
+
+test("legacy tool_call with optional unrelated calls property keeps name/arguments contract", async () => {
+  const legacy = {
+    type: "object",
+    properties: {
+      name: { type: "string" },
+      arguments: { type: "object" },
+      calls: { type: "array", items: { type: "string" } },
+    },
+    required: ["name", "arguments"],
+  };
+  const frames = (input: unknown) => [
+    encodeEventFrame("toolUseEvent", { toolUseId: "1", name: "tool_call", input }),
+    encodeEventFrame("messageStopEvent", {}),
+  ];
+  const valid = await new KiroExecutor()
+    .transformEventStreamToSSE(
+      buildEventStreamResponse(frames({ name: "synthetic_lookup", arguments: {} })),
+      "model",
+      { toolCallSchema: legacy }
+    )
+    .text();
+  assert.doesNotMatch(valid, /invalid_kiro_tool_call/);
+  assert.equal(toolDeltas(valid).length, 2);
+
+  const wrongContract = await new KiroExecutor()
+    .transformEventStreamToSSE(
+      buildEventStreamResponse(frames({ calls: [{ name: "x", arguments: {} }] })),
+      "model",
+      { toolCallSchema: legacy }
+    )
+    .text();
+  assert.match(wrongContract, /invalid_kiro_tool_call/);
+});
+
+test("isKiroCallsContract recognizes only the required calls[] contract", () => {
+  assert.equal(isKiroCallsContract(HERMES_SCHEMA), true);
+  assert.equal(isKiroCallsContract(undefined), false);
+  assert.equal(isKiroCallsContract({ properties: { calls: { type: "array" } } }), false);
+  assert.equal(
+    isKiroCallsContract({ ...HERMES_SCHEMA, required: ["calls", "name", "arguments"] }),
+    false
+  );
+  assert.equal(
+    isKiroCallsContract({
+      type: "object",
+      properties: { calls: { type: "array", items: { type: "string" } } },
+      required: ["calls"],
+    }),
+    false
+  );
+});
+
+async function translateToClient(executorSse: string, clientFormat: string): Promise<string> {
+  const transform = createSSETransformStreamWithLogger(
+    FORMATS.OPENAI,
+    clientFormat,
+    "kiro",
+    null,
+    null,
+    "synthetic-model"
+  );
+  const upstream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(textEncoder.encode(executorSse));
+      controller.close();
+    },
+  });
+  const reader = upstream.pipeThrough(transform).getReader();
+  let out = "";
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    out += new TextDecoder().decode(value);
+  }
+  return out;
+}
+
+const CALLS_CASES: Array<[string, unknown, string[]]> = [
+  ["simple", { calls: [{ name: "synthetic_lookup", arguments: {} }] }, []],
+  [
+    "multiple",
+    {
+      calls: [
+        { name: "first", arguments: { a: 1 } },
+        { name: "second", arguments: { b: [2] } },
+      ],
+    },
+    [],
+  ],
+  [
+    "fragmented",
+    {
+      calls: [
+        { name: "first", arguments: {} },
+        { name: "second", arguments: { v: 1 } },
+      ],
+    },
+    ["fragment"],
+  ],
+];
+
+for (const [label, expected, flags] of CALLS_CASES) {
+  for (const client of [FORMATS.OPENAI, FORMATS.CLAUDE]) {
+    test(`calls[] ${label} survives executor + ${client} client translation`, async () => {
+      const serialized = JSON.stringify(expected);
+      const inputs = flags.includes("fragment")
+        ? [serialized.slice(0, 17), serialized.slice(17, 40), serialized.slice(40)]
+        : [expected];
+      const executorSse = await new KiroExecutor()
+        .transformEventStreamToSSE(
+          buildEventStreamResponse([
+            ...inputs.map((input) =>
+              encodeEventFrame("toolUseEvent", { toolUseId: "t1", name: "tool_call", input })
+            ),
+            encodeEventFrame("messageStopEvent", {}),
+          ]),
+          "synthetic-model",
+          { toolCallSchema: HERMES_SCHEMA }
+        )
+        .text();
+      assert.doesNotMatch(executorSse, /invalid_kiro_tool_call/);
+      const text = await translateToClient(executorSse, client);
+      assert.doesNotMatch(text, /invalid_kiro_tool_call/);
+      let args = "";
+      if (client === FORMATS.OPENAI) {
+        args = toolDeltas(text)
+          .map((x) => (x.function as Record<string, unknown>).arguments || "")
+          .join("");
+        assert.ok(
+          toolDeltas(text).some(
+            (x) => (x.function as Record<string, unknown> | undefined)?.name === "tool_call"
+          )
+        );
+      } else {
+        args = collectSseJson(text)
+          .filter(
+            (c) => (c.delta as Record<string, unknown> | undefined)?.type === "input_json_delta"
+          )
+          .map((c) => (c.delta as Record<string, unknown>).partial_json as string)
+          .join("");
+        assert.match(text, /"name":"tool_call"/);
+      }
+      assert.deepEqual(JSON.parse(args), expected);
+    });
+  }
+}

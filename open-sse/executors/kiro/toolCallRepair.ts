@@ -36,6 +36,13 @@ const KIRO_TOOL_CALL_REPAIR_INSTRUCTION = [
   "Do not emit a tool_call wrapper without input.name and input.arguments.",
 ].join(" ");
 
+const KIRO_TOOL_CALL_REPAIR_CALLS_INSTRUCTION = [
+  "Retry the previous response because its Kiro tool_call wrapper was malformed.",
+  "If you use the wrapper tool named tool_call, its input must be a JSON object with a non-empty calls array.",
+  "Each calls item must be an object with a non-empty string name and an arguments object.",
+  "Do not emit a tool_call wrapper with an empty or missing calls array.",
+].join(" ");
+
 export function isKiroToolCallRepairEnabled(): boolean {
   try {
     return isFeatureFlagEnabled(KIRO_TOOL_CALL_REPAIR_FLAG);
@@ -56,14 +63,21 @@ const asRecord = (value: unknown): JsonRecord | null =>
  * `<thinking_mode>` hint also lives. Only the validation message is echoed
  * (capped at 300 chars); tool arguments never are.
  */
-export function buildKiroToolCallRepairPayload(transformedBody: unknown, reason: string): unknown {
+export function buildKiroToolCallRepairPayload(
+  transformedBody: unknown,
+  reason: string,
+  callsContract = false
+): unknown {
   const repaired = structuredClone(transformedBody) as unknown;
   const userInput = asRecord(
     asRecord(asRecord(asRecord(repaired)?.conversationState)?.currentMessage)?.userInputMessage
   );
   if (!userInput) return repaired;
   const capped = String(reason || "invalid tool_call payload").slice(0, MAX_REASON_CHARS);
-  const instruction = `${KIRO_TOOL_CALL_REPAIR_INSTRUCTION} Previous validation error: ${capped}`;
+  const base = callsContract
+    ? KIRO_TOOL_CALL_REPAIR_CALLS_INSTRUCTION
+    : KIRO_TOOL_CALL_REPAIR_INSTRUCTION;
+  const instruction = `${base} Previous validation error: ${capped}`;
   const content = typeof userInput.content === "string" ? userInput.content : "";
   userInput.content = content ? `${content}\n\n${instruction}` : instruction;
   return repaired;
@@ -129,10 +143,11 @@ export function createKiroToolCallRepairStream(params: {
   transform: KiroSseTransform;
   retry: (payload: unknown, signal: AbortSignal) => Promise<Response>;
   transformedBody: unknown;
+  callsContract?: boolean;
   signal?: AbortSignal | null;
   log?: ExecutorLog | null;
 }): Response {
-  const { upstream, transform, retry, transformedBody, signal, log } = params;
+  const { upstream, transform, retry, transformedBody, callsContract, signal, log } = params;
   const retryAbort = new AbortController();
   let phase: "first" | "retry" | "done" = "first";
   let cancelled = false;
@@ -160,7 +175,10 @@ export function createKiroToolCallRepairStream(params: {
     let response: Response;
     try {
       const retrySignal = signal ? AbortSignal.any([signal, retryAbort.signal]) : retryAbort.signal;
-      response = await retry(buildKiroToolCallRepairPayload(transformedBody, reason), retrySignal);
+      response = await retry(
+        buildKiroToolCallRepairPayload(transformedBody, reason, callsContract),
+        retrySignal
+      );
     } catch (error) {
       if (signal?.aborted || retryAbort.signal.aborted) throw error;
       return "Kiro tool_call repair retry failed";
