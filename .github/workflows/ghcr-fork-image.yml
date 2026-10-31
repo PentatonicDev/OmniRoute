@@ -28,10 +28,10 @@ concurrency:
 
 jobs:
   build:
-    name: Build and push runner-base (linux/amd64)
+    name: Build and push runner-base (linux/arm64)
     # Upstream (cheaper-inference) has its own publish pipeline; this one is for the fork.
     if: github.repository_owner == 'PentatonicDev'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04-arm
     # Same webpack build as docker-publish.yml: 27-55 min observed on hosted runners.
     timeout-minutes: 180
     permissions:
@@ -106,7 +106,7 @@ jobs:
         with:
           context: .
           target: runner-base
-          platforms: linux/amd64
+          platforms: linux/arm64
           build-args: |
             OMNIROUTE_USE_TURBOPACK=0
             OMNIROUTE_BUILD_MEMORY_MB=12288
@@ -115,8 +115,8 @@ jobs:
           labels: |
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.revision=${{ steps.meta.outputs.full_sha }}
-          cache-from: type=gha,scope=ghcr-fork-amd64
-          cache-to: type=gha,scope=ghcr-fork-amd64,mode=max,ignore-error=true
+          cache-from: type=gha,scope=ghcr-fork-arm64
+          cache-to: type=gha,scope=ghcr-fork-arm64,mode=max,ignore-error=true
 
       - name: Summary
         env:
