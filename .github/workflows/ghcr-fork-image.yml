@@ -5,7 +5,11 @@ name: Build fork image to GHCR
 # Never build this image on a production host (it starves the box; see t_189316ce).
 # Independent of docker-publish.yml: no Docker Hub secrets, no release tags, no :latest.
 #
-# Tags: <first 8 chars of the commit SHA> and sha-<full commit SHA>.
+# `ref` accepts a short SHA, full SHA, branch or tag. actions/checkout only treats a
+# 40/64-char hex `ref` as a commit, so we check out the full history without `ref`
+# and resolve it ourselves with git rev-parse (fails on missing or ambiguous refs).
+#
+# Tags: <first 8 chars of the resolved commit SHA> and sha-<full resolved commit SHA>.
 
 on:
   workflow_dispatch:
@@ -38,18 +42,33 @@ jobs:
     steps:
       - name: Validate ref input
         run: |
-          if ! printf '%s' "$INPUT_REF" | grep -Eq '^[A-Za-z0-9._/-]{1,200}$'; then
+          if ! printf '%s' "$INPUT_REF" | grep -Eq '^[A-Za-z0-9._/][A-Za-z0-9._/-]{0,199}$'; then
             echo "::error::ref contains unsupported characters"
             exit 1
           fi
 
-      - name: Checkout
+      - name: Checkout (full history, no ref)
         uses: actions/checkout@v7
         with:
           persist-credentials: false
-          ref: ${{ inputs.ref }}
-          # Full history so a short SHA (e.g. 32bc8dac) resolves as well as a full one.
           fetch-depth: 0
+
+      - name: Resolve ref to a commit
+        run: |
+          resolved=""
+          for candidate in "$INPUT_REF" "origin/$INPUT_REF"; do
+            if resolved="$(git rev-parse --verify --quiet "${candidate}^{commit}" 2>/dev/null)"; then
+              break
+            fi
+            resolved=""
+          done
+          if [ -z "$resolved" ]; then
+            reason="$(git rev-parse --verify "${INPUT_REF}^{commit}" 2>&1 || true)"
+            echo "::error::ref '${INPUT_REF}' is not a known commit, branch or tag, or is ambiguous: ${reason}"
+            exit 1
+          fi
+          echo "Resolved '${INPUT_REF}' -> ${resolved}"
+          git checkout --detach "$resolved"
 
       - name: Resolve image tags
         id: meta
