@@ -1,4 +1,5 @@
 name: Build fork image to GHCR
+# probe: comentário apenas, para CI de baseline (não mesclar)
 
 # Fork-only: builds the Dockerfile `runner-base` target for an arbitrary ref on a
 # GitHub-hosted runner and pushes it to ghcr.io/<owner>/omniroute with GITHUB_TOKEN.
