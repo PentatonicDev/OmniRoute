@@ -35,7 +35,7 @@ export function validateKiroToolName(toolUse: JsonRecord): string {
   return toolName;
 }
 
-export function validateKiroToolCallWrapperInput(toolInput: unknown): void {
+export function validateKiroToolCallWrapperInput(toolInput: unknown, callsSchema = false): void {
   if (toolInput === undefined) {
     throw new Error("Invalid Kiro tool_call payload: missing input");
   }
@@ -46,6 +46,28 @@ export function validateKiroToolCallWrapperInput(toolInput: unknown): void {
     );
   }
   const record = input as JsonRecord;
+  if (callsSchema) {
+    if (
+      !Array.isArray(record.calls) ||
+      record.calls.length === 0 ||
+      !record.calls.every((item: unknown) => {
+        if (!item || typeof item !== "object" || Array.isArray(item)) return false;
+        const call = item as JsonRecord;
+        return (
+          typeof call.name === "string" &&
+          !!call.name.trim() &&
+          !!call.arguments &&
+          typeof call.arguments === "object" &&
+          !Array.isArray(call.arguments)
+        );
+      })
+    ) {
+      throw new Error(
+        "Invalid Kiro tool_call payload: input.calls must contain named calls with object arguments"
+      );
+    }
+    return;
+  }
   if (typeof record.name !== "string" || !record.name.trim()) {
     throw new Error("Invalid Kiro tool_call payload: missing nested MCP tool name at input.name");
   }

@@ -289,3 +289,52 @@ test("buildKiroToolCallRepairPayload appends a capped reason to the current user
   assert.match(content, /Previous validation error: x{300}$/);
   assert.deepEqual(repaired.conversationState.history, original.conversationState.history);
 });
+
+test("executor propagates declared calls schema in streaming and non-streaming modes", async () => {
+  for (const stream of [true, false]) {
+    const bodies = installFetch([
+      [
+        kiroEventFrame("toolUseEvent", {
+          toolUseId: "call_1",
+          name: "tool_call",
+          input: { calls: [{ name: "synthetic", arguments: {} }] },
+        }),
+        kiroEventFrame("messageStopEvent", {}),
+      ],
+    ]);
+    const body = {
+      conversationState: {
+        currentMessage: {
+          userInputMessage: {
+            content: "hello",
+            userInputMessageContext: {
+              tools: [
+                {
+                  toolSpecification: {
+                    name: "tool_call",
+                    inputSchema: {
+                      json: { type: "object", properties: { calls: { type: "array" } } },
+                    },
+                  },
+                },
+              ],
+            },
+          },
+        },
+      },
+    };
+    const result = await new KiroExecutor().execute({
+      model: "claude-sonnet-4.6",
+      body,
+      stream,
+      credentials: {
+        apiKey: "synthetic",
+        providerSpecificData: { authMethod: "api_key", region: "us-east-1" },
+      },
+    } as Parameters<InstanceType<typeof KiroExecutor>["execute"]>[0]);
+    const text = await result.response.text();
+    assert.equal(bodies.length, 1);
+    assert.doesNotMatch(text, /invalid_kiro_tool_call|repair_retry_failed/);
+    assert.match(text, /synthetic/);
+  }
+});
