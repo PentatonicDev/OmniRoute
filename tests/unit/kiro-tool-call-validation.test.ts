@@ -280,26 +280,15 @@ test("Kiro calls contract parses JSON-string arguments into objects", async () =
   });
 });
 
-test("Kiro calls contract treats omitted or empty arguments as an empty object", async () => {
-  const { text, args } = await runCallsWrapper(
-    JSON.stringify({ calls: [{ name: "mcp_ping" }, { name: "mcp_list", arguments: "" }] })
-  );
-
-  assert.doesNotMatch(text, /invalid_kiro_tool_call/);
-  assert.deepEqual(JSON.parse(args), {
-    calls: [
-      { name: "mcp_ping", arguments: {} },
-      { name: "mcp_list", arguments: {} },
-    ],
-  });
-});
-
 test("Kiro calls contract still rejects unnamed calls and non-object arguments", async () => {
   for (const calls of [
     [{ arguments: { query: "router" } }],
     [{ name: "mcp_search", arguments: "not json" }],
     [{ name: "mcp_search", arguments: "[1,2]" }],
     [{ name: "mcp_search", arguments: [1] }],
+    [{ name: "mcp_ping" }],
+    [{ name: "mcp_ping", arguments: null }],
+    [{ name: "mcp_list", arguments: "" }],
     [],
   ]) {
     const { text } = await runCallsWrapper({ calls });

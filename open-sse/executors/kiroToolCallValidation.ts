@@ -94,11 +94,11 @@ export function resolveKiroWrapperInput(
 /**
  * Best-effort normalization of a batched `calls` wrapper input before validation.
  *
- * Models sometimes emit `calls[].arguments` as a JSON string (OpenAI function-call style)
- * or omit it for argument-less tools. Both have an unambiguous meaning, so they are
- * converted to the declared object form instead of failing the whole turn. Anything else
- * (missing/blank name, non-JSON string, array/scalar arguments) is returned untouched so
- * the validator still rejects it.
+ * Models sometimes emit `calls[].arguments` as a JSON string (OpenAI function-call style).
+ * A string that parses to a JSON object has an unambiguous meaning, so it is converted to
+ * the declared object form instead of failing the whole turn. Anything else (missing/null/
+ * empty arguments, missing/blank name, non-JSON string, array/scalar arguments) is returned
+ * untouched so the validator still rejects it: the declared contract requires `arguments`.
  */
 export function normalizeKiroCallsInput(toolInput: unknown): unknown {
   let input = toolInput;
@@ -115,9 +115,7 @@ export function normalizeKiroCallsInput(toolInput: unknown): unknown {
     const call = asSchemaRecord(item);
     if (!call || typeof call.name !== "string" || !call.name.trim()) return item;
     const args = call.arguments;
-    if (args === undefined || args === null) return { ...call, arguments: {} };
-    if (typeof args !== "string") return item;
-    if (!args.trim()) return { ...call, arguments: {} };
+    if (typeof args !== "string" || !args.trim()) return item;
     try {
       const parsed = JSON.parse(args);
       return asSchemaRecord(parsed) ? { ...call, arguments: parsed } : item;
