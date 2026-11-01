@@ -227,6 +227,114 @@ test("Kiro cancels the upstream body after an invalid wrapper", async () => {
   assert.equal(cancelled, true);
 });
 
+const CALLS_SCHEMA = {
+  type: "object",
+  properties: {
+    calls: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: { name: { type: "string" }, arguments: { type: "object" } },
+        required: ["name", "arguments"],
+      },
+    },
+  },
+  required: ["calls"],
+};
+
+async function runCallsWrapper(
+  input: unknown,
+  schema: Record<string, unknown> | undefined = CALLS_SCHEMA
+) {
+  const executor = new KiroExecutor();
+  const response = buildEventStreamResponse([
+    encodeEventFrame("toolUseEvent", { toolUseId: "wrapper_1", name: "tool_call", input }),
+    encodeEventFrame("messageStopEvent", {}),
+  ]);
+  const text = await executor
+    .transformEventStreamToSSE(response, "kiro-model", { toolCallSchema: schema })
+    .text();
+  const args = toolDeltas(text)
+    .map((delta) => {
+      const fn = delta.function as Record<string, unknown> | undefined;
+      return typeof fn?.arguments === "string" ? fn.arguments : "";
+    })
+    .join("");
+  return { text, args };
+}
+
+test("Kiro calls contract parses JSON-string arguments into objects", async () => {
+  const { text, args } = await runCallsWrapper({
+    calls: [
+      { name: "mcp_search", arguments: '{"query":"router"}' },
+      { name: "mcp_read", arguments: { path: "README.md" } },
+    ],
+  });
+
+  assert.doesNotMatch(text, /invalid_kiro_tool_call/);
+  assert.deepEqual(JSON.parse(args), {
+    calls: [
+      { name: "mcp_search", arguments: { query: "router" } },
+      { name: "mcp_read", arguments: { path: "README.md" } },
+    ],
+  });
+});
+
+test("Kiro calls contract still rejects unnamed calls and non-object arguments", async () => {
+  for (const calls of [
+    [{ arguments: { query: "router" } }],
+    [{ name: "mcp_search", arguments: "not json" }],
+    [{ name: "mcp_search", arguments: "[1,2]" }],
+    [{ name: "mcp_search", arguments: [1] }],
+    [{ name: "mcp_ping" }],
+    [{ name: "mcp_ping", arguments: null }],
+    [{ name: "mcp_list", arguments: "" }],
+    [],
+  ]) {
+    const { text } = await runCallsWrapper({ calls });
+    assert.match(text, /invalid_kiro_tool_call/);
+    assert.match(text, /input\.calls must contain named calls with object arguments/);
+  }
+});
+
+test("Kiro accepts a calls wrapper when the schema was synthesized from history (no declared properties)", async () => {
+  const synthesized = { type: "object", properties: {} };
+  const { text, args } = await runCallsWrapper(
+    { calls: [{ name: "mcp_search", arguments: '{"query":"router"}' }] },
+    synthesized
+  );
+
+  assert.doesNotMatch(text, /invalid_kiro_tool_call/);
+  assert.deepEqual(JSON.parse(args), {
+    calls: [{ name: "mcp_search", arguments: { query: "router" } }],
+  });
+});
+
+test("Kiro keeps legacy validation for undeclared schemas when input is not calls-shaped", async () => {
+  const synthesized = { type: "object", properties: {} };
+  const { text } = await runCallsWrapper({ arguments: { query: "router" } }, synthesized);
+  assert.match(text, /missing nested MCP tool name at input\.name/);
+
+  const legacy = await runCallsWrapper(
+    { name: "mcp_search", arguments: { query: "router" } },
+    synthesized
+  );
+  assert.doesNotMatch(legacy.text, /invalid_kiro_tool_call/);
+});
+
+test("Kiro does not relax a declared non-calls schema", async () => {
+  const declared = {
+    type: "object",
+    properties: { name: { type: "string" }, arguments: { type: "object" } },
+    required: ["name", "arguments"],
+  };
+  const { text } = await runCallsWrapper(
+    { calls: [{ name: "mcp_search", arguments: {} }] },
+    declared
+  );
+  assert.match(text, /missing nested MCP tool name at input\.name/);
+});
+
 test("Kiro stream errors become Responses response.failed events", async () => {
   const transform = createSSETransformStreamWithLogger(
     FORMATS.KIRO,

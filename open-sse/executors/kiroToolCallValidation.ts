@@ -56,6 +56,76 @@ export function isKiroCallsContract(schema: unknown): boolean {
   return !!itemProps && "name" in itemProps && "arguments" in itemProps;
 }
 
+/**
+ * True when the wrapper schema declares nothing about its input: the translator
+ * synthesizes `{type:"object",properties:{}}` for requests that carry tool_call history
+ * but no `tools` (typical of subagent turns). With no declared contract, a batched
+ * `{calls:[{name,arguments}]}` payload is as legitimate as the legacy `{name,arguments}`.
+ */
+export function isKiroUndeclaredWrapperSchema(schema: unknown): boolean {
+  const root = asSchemaRecord(schema);
+  if (!root) return true;
+  const properties = asSchemaRecord(root.properties);
+  return !properties || Object.keys(properties).length === 0;
+}
+
+/**
+ * Decide how to validate a wrapper input. Returns the (possibly normalized) input and
+ * whether the batched `calls` contract applies: either the schema declares it, or the
+ * schema declares nothing and the input is calls-shaped without a top-level `name`.
+ */
+export function resolveKiroWrapperInput(
+  toolInput: unknown,
+  schema: unknown
+): { input: unknown; callsContract: boolean } {
+  if (isKiroCallsContract(schema)) {
+    return { input: normalizeKiroCallsInput(toolInput), callsContract: true };
+  }
+  if (isKiroUndeclaredWrapperSchema(schema)) {
+    const normalized = normalizeKiroCallsInput(toolInput);
+    const record = asSchemaRecord(normalized);
+    if (record && Array.isArray(record.calls) && !("name" in record)) {
+      return { input: normalized, callsContract: true };
+    }
+  }
+  return { input: toolInput, callsContract: false };
+}
+
+/**
+ * Best-effort normalization of a batched `calls` wrapper input before validation.
+ *
+ * Models sometimes emit `calls[].arguments` as a JSON string (OpenAI function-call style).
+ * A string that parses to a JSON object has an unambiguous meaning, so it is converted to
+ * the declared object form instead of failing the whole turn. Anything else (missing/null/
+ * empty arguments, missing/blank name, non-JSON string, array/scalar arguments) is returned
+ * untouched so the validator still rejects it: the declared contract requires `arguments`.
+ */
+export function normalizeKiroCallsInput(toolInput: unknown): unknown {
+  let input = toolInput;
+  if (typeof input === "string") {
+    try {
+      input = JSON.parse(input);
+    } catch {
+      return toolInput;
+    }
+  }
+  const record = asSchemaRecord(input);
+  if (!record || !Array.isArray(record.calls)) return toolInput;
+  const calls = record.calls.map((item: unknown) => {
+    const call = asSchemaRecord(item);
+    if (!call || typeof call.name !== "string" || !call.name.trim()) return item;
+    const args = call.arguments;
+    if (typeof args !== "string" || !args.trim()) return item;
+    try {
+      const parsed = JSON.parse(args);
+      return asSchemaRecord(parsed) ? { ...call, arguments: parsed } : item;
+    } catch {
+      return item;
+    }
+  });
+  return { ...record, calls };
+}
+
 export function validateKiroToolCallWrapperInput(toolInput: unknown, callsSchema = false): void {
   if (toolInput === undefined) {
     throw new Error("Invalid Kiro tool_call payload: missing input");
