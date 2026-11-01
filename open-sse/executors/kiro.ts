@@ -32,6 +32,7 @@ import {
   encodeSse,
   getBufferedKiroToolInput,
   isKiroCallsContract,
+  resolveKiroWrapperInput,
   validateKiroToolCallWrapperInput,
   validateKiroToolName,
   validateKiroToolUse,
@@ -651,9 +652,12 @@ export class KiroExecutor extends BaseExecutor {
       controller: TransformStreamDefaultController
     ): boolean => {
       for (const toolCall of state.pendingWrapperToolCalls.values()) {
-        const toolInput = getBufferedKiroToolInput(toolCall);
+        const { input: toolInput, callsContract } = resolveKiroWrapperInput(
+          getBufferedKiroToolInput(toolCall),
+          opts.toolCallSchema
+        );
         try {
-          validateKiroToolCallWrapperInput(toolInput, isKiroCallsContract(opts.toolCallSchema));
+          validateKiroToolCallWrapperInput(toolInput, callsContract);
         } catch (error) {
           failInvalidToolCall(controller, error instanceof Error ? error.message : String(error));
           return false;
