@@ -9,7 +9,9 @@ name: Build fork image to GHCR
 # 40/64-char hex `ref` as a commit, so we check out the full history without `ref`
 # and resolve it ourselves with git rev-parse (fails on missing or ambiguous refs).
 #
-# Tags: <first 8 chars of the resolved commit SHA> and sha-<full resolved commit SHA>.
+# Tags: <package.json version> (e.g. 3.8.54, what docker-compose pins), <first 8 chars of
+# the resolved commit SHA> and sha-<full resolved commit SHA>. Rebuilding another commit with
+# the same version moves the version tag; the SHA tags stay immutable.
 
 on:
   workflow_dispatch:
@@ -75,12 +77,19 @@ jobs:
         run: |
           full_sha="$(git rev-parse HEAD)"
           short_sha="${full_sha:0:8}"
+          version="$(node -p 'require("./package.json").version')"
+          if ! printf '%s' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$'; then
+            echo "::error::package.json version '${version}' is not a valid image tag"
+            exit 1
+          fi
           image="ghcr.io/$(printf '%s' "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')/omniroute"
           {
             echo "image=${image}"
             echo "full_sha=${full_sha}"
             echo "short_sha=${short_sha}"
+            echo "version=${version}"
             echo "tags<<EOF"
+            echo "${image}:${version}"
             echo "${image}:${short_sha}"
             echo "${image}:sha-${full_sha}"
             echo "EOF"
@@ -115,6 +124,7 @@ jobs:
           labels: |
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.revision=${{ steps.meta.outputs.full_sha }}
+            org.opencontainers.image.version=${{ steps.meta.outputs.version }}
           cache-from: type=gha,scope=ghcr-fork-arm64
           cache-to: type=gha,scope=ghcr-fork-arm64,mode=max,ignore-error=true
 
@@ -124,11 +134,13 @@ jobs:
           IMAGE: ${{ steps.meta.outputs.image }}
           SHORT_SHA: ${{ steps.meta.outputs.short_sha }}
           FULL_SHA: ${{ steps.meta.outputs.full_sha }}
+          VERSION: ${{ steps.meta.outputs.version }}
         run: |
           {
             echo "### Fork image published"
             echo ""
+            echo "- Version: \`${VERSION}\`"
             echo "- Commit: \`${FULL_SHA}\`"
             echo "- Digest: \`${DIGEST}\`"
-            echo "- Pull: \`${IMAGE}:${SHORT_SHA}\` or \`${IMAGE}@${DIGEST}\`"
+            echo "- Pull: \`${IMAGE}:${VERSION}\`, \`${IMAGE}:${SHORT_SHA}\` or \`${IMAGE}@${DIGEST}\`"
           } >> "$GITHUB_STEP_SUMMARY"
