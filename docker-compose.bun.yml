@@ -2,7 +2,7 @@ services:
   omniroute:
     build:
       context: .
-      dockerfile: Dockerfile.bun
+      dockerfile: Dockerfile
     restart: unless-stopped
     expose:
       - '20128'
